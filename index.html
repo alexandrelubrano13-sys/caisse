@@ -70,8 +70,28 @@
     return cfg;
   })();
 
-  // Appel à la caisse (Apps Script) par JSONP
+  // Appel à la caisse SANS envoyer les cookies Google du téléphone
+  // (sinon un compte Google de moins de 15 ans est bloqué par Google).
   function appelCaisse(params) {
+    if (!CFG.url) return Promise.reject(new Error('Scanne d\'abord le QR code affiché sur la caisse (bouton 📱 Téléphone).'));
+    const q = new URLSearchParams(Object.assign({}, params, { cle: CFG.cle }));
+    return fetch(CFG.url + '?' + q.toString(), { method: 'GET', mode: 'cors', credentials: 'omit', redirect: 'follow', cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('réponse ' + r.status);
+        return r.text();
+      })
+      .then(function (t) {
+        try { return JSON.parse(t); }
+        catch (e) { throw new Error('réponse inattendue de Google (compte bloqué ou déploiement ?)'); }
+      })
+      .catch(function (err) {
+        // Secours : ancienne méthode (marche si le navigateur n'est pas connecté à un compte enfant)
+        return appelCaisseJsonp(params).catch(function () { throw err; });
+      });
+  }
+
+  // Ancienne méthode (JSONP)
+  function appelCaisseJsonp(params) {
     return new Promise(function (ok, ko) {
       if (!CFG.url) return ko(new Error('Scanne d\'abord le QR code affiché sur la caisse (bouton 📱 Téléphone).'));
       const cb = 'rep' + Date.now() + Math.floor(Math.random() * 1000);
@@ -93,6 +113,18 @@
     }).catch(function (e) {
       $('connexion').textContent = '🔴 ' + e.message;
       $('connexion').style.background = '#991b1b';
+      if (CFG.url) {
+        const lien = document.createElement('a');
+        lien.href = CFG.url + '?action=ping&cle=' + encodeURIComponent(CFG.cle);
+        lien.target = '_blank';
+        lien.textContent = '🔎 Tester l\'adresse de la caisse';
+        lien.style.cssText = 'display:block;color:#fde68a;margin-top:6px;';
+        const det = document.createElement('div');
+        det.style.cssText = 'font-size:.75rem;opacity:.8;word-break:break-all;margin-top:4px;';
+        det.textContent = CFG.url;
+        $('connexion').appendChild(lien);
+        $('connexion').appendChild(det);
+      }
     });
   }
   function msg(t) { $('msg').textContent = t; }
