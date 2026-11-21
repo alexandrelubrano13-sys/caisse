@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta charset="UTF-8">
+  <title>Douchette téléphone</title>
+  <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #fff; text-align: center; }
+    header { padding: 12px; font-weight: 800; font-size: 1.15rem; background: #059669; }
+    .zone { position: relative; width: 100%; max-width: 520px; margin: 0 auto; aspect-ratio: 4 / 3; background: #000; overflow: hidden; }
+    video { width: 100%; height: 100%; object-fit: cover; }
+    .viseur { position: absolute; left: 10%; right: 10%; top: 30%; bottom: 30%; border: 4px solid #22c55e; border-radius: 14px; box-shadow: 0 0 0 999px rgba(0,0,0,.35); }
+    .flash { position: absolute; inset: 0; background: #22c55e; opacity: 0; transition: opacity .2s; pointer-events: none; }
+    #msg { padding: 10px 14px; font-weight: 700; min-height: 2.6em; }
+    #dernier { margin: 8px 14px; padding: 14px; border-radius: 14px; background: #1e293b; font-size: 1.3rem; font-weight: 800; min-height: 2.5em; }
+    #compteur { opacity: .7; font-size: .9rem; }
+    .boutons { display: flex; gap: 10px; padding: 10px 14px; flex-wrap: wrap; justify-content: center; }
+    button, .btn { border: none; border-radius: 12px; padding: 14px 18px; font-size: 1.05rem; font-weight: 800; color: #fff; background: #2563eb; cursor: pointer; }
+    .btn-photo { background: #f59e0b; }
+    .btn-go { background: #16a34a; font-size: 1.25rem; padding: 18px 26px; }
+    .saisie { display: flex; gap: 8px; padding: 0 14px 18px; max-width: 520px; margin: 0 auto; }
+    .saisie input { flex: 1; min-width: 0; padding: 12px; border-radius: 12px; border: none; font-size: 1.1rem; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <header>📱 Douchette téléphone · Supermarché de la Maison</header>
+
+  <div class="zone">
+    <video id="video" playsinline muted></video>
+    <div class="viseur"></div>
+    <div class="flash" id="flash"></div>
+  </div>
+
+  <div id="connexion" style="padding:8px;font-weight:700;background:#334155;">⏳ Connexion à la caisse…</div>
+  <div id="msg">Appuie sur « Démarrer » puis autorise la caméra.</div>
+
+  <div class="boutons">
+    <button class="btn-go" id="btnDemarrer" onclick="demarrer()">▶️ Démarrer le scan</button>
+    <label class="btn btn-photo" for="photo">📷 Photo</label>
+    <input type="file" id="photo" accept="image/*" capture="environment" style="display:none" onchange="lirePhoto(this)">
+  </div>
+
+  <div id="dernier">Aucun article scanné</div>
+  <div id="compteur"></div>
+
+  <div class="saisie">
+    <input type="text" id="saisie" inputmode="numeric" placeholder="Ou tape le code ici">
+    <button onclick="envoyerSaisie()">OK</button>
+  </div>
+
+<script>
+  const FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code'];
+  let flux = null, boucle = null, lecteur = null, nbEnvoyes = 0;
+  let dernier = { code: '', t: 0 };
+
+  function $(id) { return document.getElementById(id); }
+
+  // ---- Réglages reçus par le QR code de la caisse (#url=...&cle=...), gardés sur le téléphone ----
+  const CFG = (function () {
+    let cfg = {};
+    try { cfg = JSON.parse(localStorage.getItem('caisse_cfg') || '{}'); } catch (e) {}
+    const h = new URLSearchParams(location.hash.slice(1));
+    if (h.get('url') && h.get('cle')) {
+      cfg = { url: h.get('url'), cle: h.get('cle') };
+      try { localStorage.setItem('caisse_cfg', JSON.stringify(cfg)); } catch (e) {}
+      history.replaceState(null, '', location.pathname);
+    }
+    return cfg;
+  })();
+
+  // Appel à la caisse (Apps Script) par JSONP
+  function appelCaisse(params) {
+    return new Promise(function (ok, ko) {
+      if (!CFG.url) return ko(new Error('Scanne d\'abord le QR code affiché sur la caisse (bouton 📱 Téléphone).'));
+      const cb = 'rep' + Date.now() + Math.floor(Math.random() * 1000);
+      const sc = document.createElement('script');
+      const minuteur = setTimeout(function () { fin(); ko(new Error('pas de réponse de la caisse. Vérifie le déploiement : « Qui a accès » = Tout le monde.')); }, 20000);
+      function fin() { clearTimeout(minuteur); try { delete window[cb]; } catch (e) { window[cb] = undefined; } sc.remove(); }
+      window[cb] = function (r) { fin(); ok(r); };
+      sc.onerror = function () { fin(); ko(new Error('connexion impossible (internet ou déploiement).')); };
+      const q = new URLSearchParams(Object.assign({}, params, { cle: CFG.cle, callback: cb }));
+      sc.src = CFG.url + '?' + q.toString();
+      document.body.appendChild(sc);
+    });
+  }
+
+  function testerConnexion() {
+    appelCaisse({ action: 'ping' }).then(function (r) {
+      $('connexion').textContent = r && r.ok ? '🟢 Connecté à la caisse' : '🔴 ' + (r && r.erreur || 'Erreur');
+      $('connexion').style.background = r && r.ok ? '#065f46' : '#991b1b';
+    }).catch(function (e) {
+      $('connexion').textContent = '🔴 ' + e.message;
+      $('connexion').style.background = '#991b1b';
+    });
+  }
+  function msg(t) { $('msg').textContent = t; }
+
+  function bip(ok) {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const a = new Ctx();
+      const o = a.createOscillator();
+      const g = a.createGain();
+      o.frequency.value = ok ? 1150 : 300;
+      g.gain.value = 0.15;
+      o.connect(g); g.connect(a.destination);
+      o.start(); o.stop(a.currentTime + (ok ? 0.1 : 0.3));
+      setTimeout(function () { a.close(); }, 600);
+    } catch (e) {}
+    if (navigator.vibrate) navigator.vibrate(ok ? 80 : [60, 60, 60]);
+  }
+
+  async function ouvrirFlux() {
+    const essais = [{ facingMode: 'environment' }, true];
+    let derniere;
+    for (const v of essais) {
+      try {
+        const f = await navigator.mediaDevices.getUserMedia({ video: v, audio: false });
+        f.__contraintes = v;
+        return f;
+      } catch (e) { derniere = e; if (e.name === 'NotAllowedError') break; }
+    }
+    throw derniere;
+  }
+
+  async function demarrer() {
+    $('btnDemarrer').hidden = true;
+    msg('Démarrage de la caméra…');
+    const video = $('video');
+    try {
+      if ('BarcodeDetector' in window) {
+        let formats = FORMATS;
+        try {
+          const sup = await BarcodeDetector.getSupportedFormats();
+          formats = FORMATS.filter(function (f) { return sup.indexOf(f) >= 0; });
+        } catch (e) {}
+        flux = await ouvrirFlux();
+        video.srcObject = flux;
+        await video.play();
+        const det = new BarcodeDetector({ formats: formats });
+        msg('Montre le code-barres dans le cadre vert');
+        boucle = setInterval(async function () {
+          if (video.readyState < 2) return;
+          try {
+            const r = await det.detect(video);
+            if (r && r.length && r[0].rawValue) lu(r[0].rawValue.trim());
+          } catch (e) {}
+        }, 250);
+      } else if (typeof ZXing !== 'undefined') {
+        const test = await ouvrirFlux();
+        const contraintes = { video: test.__contraintes };
+        test.getTracks().forEach(function (t) { t.stop(); });
+        lecteur = new ZXing.BrowserMultiFormatReader();
+        msg('Montre le code-barres dans le cadre vert');
+        await lecteur.decodeFromConstraints(contraintes, video, function (res) {
+          if (res && res.text) lu(res.text.trim());
+        });
+      } else {
+        throw new Error('aucun lecteur de codes-barres');
+      }
+    } catch (e) {
+      msg('⚠️ Caméra indisponible (' + (e.name || '') + ' ' + (e.message || '') + '). Autorise la caméra pour ce site (🔒 à gauche de l\'adresse), ou utilise 📷 Photo.');
+      $('btnDemarrer').hidden = false;
+      bip(false);
+    }
+  }
+
+  function lu(code) {
+    const maintenant = Date.now();
+    if (code === dernier.code && maintenant - dernier.t < 2000) return;
+    dernier = { code: code, t: maintenant };
+    const f = $('flash');
+    f.style.opacity = 0.6; setTimeout(function () { f.style.opacity = 0; }, 200);
+    bip(true);
+    envoyer(code);
+  }
+
+  function envoyer(code) {
+    $('dernier').textContent = '⏳ Envoi de ' + code + '…';
+    appelCaisse({ action: 'scan', code: code })
+      .then(function (r) {
+        if (!r || !r.ok) throw new Error(r && r.erreur || 'refusé');
+        nbEnvoyes++;
+        $('compteur').textContent = nbEnvoyes + ' article(s) envoyé(s) à la caisse';
+        if (r && r.inconnu) $('dernier').textContent = '❓ ' + code + ' : produit inconnu, la caisse va demander sa fiche';
+        else if (r && r.nom) $('dernier').textContent = '✅ ' + (r.emoji || '') + ' ' + r.nom;
+        else $('dernier').textContent = '✅ ' + code;
+      })
+      .catch(function (err) {
+        bip(false);
+        $('dernier').textContent = '⚠️ Envoi impossible : ' + (err && err.message ? err.message : err);
+      });
+  }
+
+  function envoyerSaisie() {
+    const c = $('saisie').value.trim();
+    $('saisie').value = '';
+    if (c) { bip(true); envoyer(c); }
+  }
+  $('saisie').addEventListener('keydown', function (e) { if (e.key === 'Enter') envoyerSaisie(); });
+
+  async function lirePhoto(input) {
+    const fichier = input.files && input.files[0];
+    input.value = '';
+    if (!fichier) return;
+    msg('Lecture de la photo…');
+    try {
+      let code = '';
+      if ('BarcodeDetector' in window) {
+        const img = await createImageBitmap(fichier);
+        const r = await new BarcodeDetector({ formats: FORMATS }).detect(img);
+        if (r && r.length) code = r[0].rawValue;
+      }
+      if (!code && typeof ZXing !== 'undefined') {
+        const url = URL.createObjectURL(fichier);
+        try { const res = await new ZXing.BrowserMultiFormatReader().decodeFromImageUrl(url); code = res.text; }
+        catch (e) {}
+        URL.revokeObjectURL(url);
+      }
+      if (code) { msg('Code trouvé !'); lu(code.trim()); }
+      else { msg('Aucun code-barres trouvé sur la photo. Réessaie de plus près, bien à plat.'); bip(false); }
+    } catch (e) {
+      msg('⚠️ Photo illisible : ' + (e.message || e)); bip(false);
+    }
+  }
+  testerConnexion();
+</script>
+</body>
+</html>
