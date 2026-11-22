@@ -63,7 +63,7 @@
     try { cfg = JSON.parse(localStorage.getItem('caisse_cfg') || '{}'); } catch (e) {}
     const h = new URLSearchParams(location.hash.slice(1));
     if (h.get('url') && h.get('cle')) {
-      cfg = { url: h.get('url'), cle: h.get('cle') };
+      cfg = { url: h.get('url'), cle: h.get('cle'), poste: h.get('poste') || '' };
       try { localStorage.setItem('caisse_cfg', JSON.stringify(cfg)); } catch (e) {}
       history.replaceState(null, '', location.pathname);
     }
@@ -211,7 +211,7 @@
 
   function envoyer(code) {
     $('dernier').textContent = '⏳ Envoi de ' + code + '…';
-    appelCaisse({ action: 'scan', code: code })
+    appelCaisse({ action: 'scan', code: code, poste: CFG.poste || '' })
       .then(function (r) {
         if (!r || !r.ok) throw new Error(r && r.erreur || 'refusé');
         nbEnvoyes++;
